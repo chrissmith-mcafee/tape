@@ -131,6 +131,9 @@ public final class QueueFile implements Closeable, Iterable<byte[]> {
   /** When true, removing an element will also overwrite data with zero bytes. */
   private final boolean zero;
 
+  /** The maximum size of the file. */
+  private long maxSize = 0;
+
   @Private boolean closed;
 
   @Private static RandomAccessFile initializeFromFile(File file, boolean forceLegacy)
@@ -167,9 +170,20 @@ public final class QueueFile implements Closeable, Iterable<byte[]> {
   }
 
   QueueFile(File file, RandomAccessFile raf, boolean zero, boolean forceLegacy) throws IOException {
+    this(file, raf, zero, forceLegacy, 0);
+  }
+
+  QueueFile(File file, RandomAccessFile raf, boolean zero, boolean forceLegacy,
+            long maxSize) throws IOException {
     this.file = file;
     this.raf = raf;
     this.zero = zero;
+    this.maxSize = maxSize;
+
+    if (maxSize != 0 && maxSize < INITIAL_LENGTH) {
+      throw new IllegalArgumentException(
+          "Maximum size must be greater than or equal to: " + INITIAL_LENGTH);
+    }
 
     raf.seek(0);
     raf.readFully(buffer);
@@ -439,15 +453,26 @@ public final class QueueFile implements Closeable, Iterable<byte[]> {
     long remainingBytes = remainingBytes();
     if (remainingBytes >= elementLength) return;
 
-    // Expand.
+      // Expand.
     long previousLength = fileLength;
     long newLength;
-    // Double the length until we can fit the new data.
-    do {
-      remainingBytes += previousLength;
-      newLength = previousLength << 1;
-      previousLength = newLength;
-    } while (remainingBytes < elementLength);
+
+    // Consider max size
+    if ((maxSize > 0) && ((previousLength << 1) > maxSize)) {
+      newLength = maxSize;
+      remainingBytes += (newLength - previousLength);
+      if (remainingBytes < elementLength) {
+        throw new FileSizeLimitExceededException(maxSize);
+      }
+    } else {
+      // Double the length until we can fit the new data.
+      do {
+        remainingBytes += previousLength;
+        newLength = previousLength << 1;
+        previousLength = newLength;
+      }
+      while (remainingBytes < elementLength);
+    }
 
     setLength(newLength);
 
@@ -723,6 +748,7 @@ public final class QueueFile implements Closeable, Iterable<byte[]> {
     final File file;
     boolean zero = true;
     boolean forceLegacy = false;
+    long maxSize = 0;
 
     /** Start constructing a new queue backed by the given file. */
     public Builder(File file) {
@@ -735,6 +761,17 @@ public final class QueueFile implements Closeable, Iterable<byte[]> {
     /** When true, removing an element will also overwrite data with zero bytes. */
     public Builder zero(boolean zero) {
       this.zero = zero;
+      return this;
+    }
+
+    /**
+     * Sets the maximum size for the file. If the size is exceeded an exception is thrown.
+     *
+     * @param maxSize The maximum size of the file (0 = unlimited)
+     * @return The builder
+     */
+    public Builder maxSize(long maxSize) {
+      this.maxSize = maxSize;
       return this;
     }
 
@@ -752,13 +789,29 @@ public final class QueueFile implements Closeable, Iterable<byte[]> {
       RandomAccessFile raf = initializeFromFile(file, forceLegacy);
       QueueFile qf = null;
       try {
-        qf = new QueueFile(file, raf, zero, forceLegacy);
+        qf = new QueueFile(file, raf, zero, forceLegacy, maxSize);
         return qf;
       } finally {
         if (qf == null) {
           raf.close();
         }
       }
+    }
+  }
+
+  /**
+   * Exception that is thrown if the maximum size of the files is exceeded.
+   */
+  public static final class FileSizeLimitExceededException extends RuntimeException {
+    private static final long serialVersionUID = -6489858052671269376L;
+
+    /**
+     * Constructs the exception.
+     *
+     * @param maxSize The size that has been exceeded.
+     */
+    public FileSizeLimitExceededException(long maxSize) {
+      super("File size limit has been exceeded: " + maxSize);
     }
   }
 }
